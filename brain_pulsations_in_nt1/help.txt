@@ -1,5 +1,7 @@
 In the significant brain pulsation maps, the significant areas can be seen when inputting 0.95 as the minimum and 1 as the maximum value.
 The contrasts are so that *tstat1.nii.gz is denotes that the first group in the name is greater than the second vice versa for *tstat2.nii.gz
+
+The brain maps are in 3 cubic millimeter MNI152 space
 Con = awake healthy controls
 NT1 = patients with narcolepsy type 1
 sleep = NREM sleep group

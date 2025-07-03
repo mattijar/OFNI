@@ -1,0 +1,225 @@
+%If not otherwise stated, the codes were executed in ubuntu terminal. When applicable, the code is repeated for every subject.
+
+%Elimination of the 100 first samples (180 excluded in total but 80 samples are taken care by the scanner):
+
+fslroi MREG_input MREG_fslroid 100 2861
+
+%Despike:
+
+3dDespike -prefix MREG_despiked -nomask -localedit -NEW MREG_fslroid
+
+%Transforming T1 brain mask to MREG space to only count for data in the brain (so to only preprocess the data in the actual brain to lessen the computational burden):
+
+bet T1_input T1_brain -B -f X -g Y %betting the T1 data to extract brain for masking, the f and g values, X and Y below, are chosen individually so optimal brain extraction is achieved
+
+flirt -in T1_brain -ref MREG_data -out T1_flirtmask -omat flirtmask.mat -bins 256 -cost corratio -searchrx -180 180 -searchry -180 180 -searchrz -180 180 -dof 12 -interp trilinear %transform the T1 to MREG space for a nonbinarized mask
+
+fslmaths T1_flirtmask -bin T1_flirtmask_bin %binarize the created mask
+
+fslmaths MREG_despiked -mul T1_flirtmask_bin MREG_despiked_masked %multiplty the original MREG data with the created binarized mask
+
+%Spectral Entropy (SE) is calculated in MATLAB:
+
+f = 'inputniftifile.nii.gz'; %read this nifti file (MREG time signal data)
+v = niftiread(f); info = niftiinfo(f); %read given nifti file and its header info
+v = permute(v,[4 1 2 3]); %put time as first dimension
+imax = size(v,1); xmax = size(v,2); ymax = size(v,3); zmax = size(v,4); %loop sizing (get all voxels dimensions)
+vd = single(zeros(1,xmax,ymax,zmax)); %create an empty result to collect the SE values to
+
+%loop through all voxels coordinates
+for x=1:xmax
+    for y = 1:ymax
+        for z = 1:zmax
+            if ( (v(1,x,y,z)) ~= 0 ) %if not a zero voxel, continue
+                m = v(:,x,y,z); %get timeseries of a voxel
+                vd(1,x,y,z) = pentropy(detrend(m),10,'Instantaneous',false); %calculate SE from the timeseries
+                %Sampling rate of MREG = 10
+                %Get only one SE value with 'Instantaneous',false
+            end
+        end
+    end
+end
+
+%save the result (SE)
+vd = permute(vd,[2 3 4 1]); %put the SE value to 4th dimension
+info.ImageSize(4) = []; %there is no time anymore, one value, remove 4th dim from info
+info.PixelDimensions(4) = []; %same in here
+fn = 'outputniftifile_se.nii'; %outputfilename (.nii)
+niftiwrite(vd,fn,info,'Compressed',1); %create the SE result file (compresses to.nii.gz) i.e. individual SE map
+
+%For cardiorespiratory range estimation and SP calculations:
+
+3dPeriodogram -prefix MREG_pg -nfft 4096 MREG_data %create a voxel-wise periodogram from time-wise MREG data, nfft depends on the data length
+
+fslroi MREG_pg MREG_pg_pulsation_range x y %for SP calculation, exclude frequencies outside the VLF and cardiorespiratory ranges, use appropriate ranges for each pulsation separately (x and y)
+
+3dTstat -prefix MREG_pg_pulsation_sp -sum MREG_pg_pulsation_range %calculate spectral power sum
+
+%For filtering of time signal to vlf and cardiorespiratory frequencies after preprocessing:
+
+3dTproject -prefix MREG_data_filtered -dt 0.1 -bandpass x y -input MREG_data %after -bandpass use 0.008 0.1 for VLF and cardiorespiratory minimum and maximum for filtering to those ranges (x and y below)
+
+fslmaths MREG_data -Tmean MREG_tmean %For CV, the voxel-wise mean of fullband signal is calculated:
+
+fslmaths MREG_data_filtered -add MREG_tmean MREG_filtered_addmean %adding mean back to the filtered data to enable CV calculation
+
+3dTstat -prefix MREG_cv -cvar MREG_filtered_addmean %voxel-wise CV calculation
+
+%Registering the subject space SP/CV/SE maps to MNI152 3mm standard space (INPUT is the subject-wise SP/CV/SE map to transform into 3mm MIN152 space and OUTPUT is the transformed SP/CV/SE map):
+
+flirt -in INPUT -out OUTPUT -ref MNI152_3mm -applyxfm -init example_func2standard.mat %use desired MNI-template, the xfm matrix is the one created by the FSL preprocessing pipeline
+
+%Creating a 3mm MNI152 mask that includes CSF-filled ventricles etc:
+
+fslmaths MNI152_T1_3mm_brain.nii.gz -bin MNI152_T1_3mm_brain_bin.nii.gz
+
+fslmaths MNI152_T1_3mm_brain_bin.nii.gz -fillh MNI152_T1_3mm_brain_bin_fillh
+
+%Removing voxels outside the MNI152 mask to only include these in the statistical testing, example with CV but use the same for individual SP and SE maps:
+
+fslmaths MREG_cv_mni -mul MNI152_T1_3mm_brain_bin_fillh MREG_cv_mni_masked
+
+%Create a merge-file for statistical randomise analysis, example with CV but use the same for SP and SE maps. The three dots (...) denote that all subjects (1 to n) are included in the list:
+
+fslmerge -t MREG_cv_maps_merged MREG_cv_mni_masked_1 MREG_cv_mni_masked_2 MREG_cv_mni_masked_3 …
+
+%FSL randomise was used to infer statistically significant SP/CV/SE maps. The same with appropriate files are used in all the randomises described in the method section of the article and supporting information. The example is with CV:
+
+randomise -i MREG_cv_maps_merged -o MREG_cv_randomise -d design_file.mat -t design_file.con -n 10000 -T
+
+%using MATLAB, the fiducial point detection and HRV RMSSD calculations:
+
+a = signal; %physiological photoplethysmogram data
+ad = diff(a); %difference of the signal (detect maximal slope)
+thr = 240; %peak distance threshold value that can be changed manually if needed
+minpeakh = -inf; %min peak height value, can be changed manually if needed
+[pks,locs] = findpeaks(ad,'minpeakdistance',thr, 'MinPeakHeight', minpeakh); %search slope locations
+locsx = locs/300; %locations to time
+xls = 0; %initialize
+for z=1:length(locsx)-1
+    xl0 = locsx(z);
+    xl1 = locsx(z+1);
+    xl = (xl0-xl1)^2;
+    xls = xls+xl;
+end
+xlsm = xls/(length(locsx)-1);
+xlsm = xlsm*1000; %ms
+hrv = sqrt(xlsm); %hrv rmssd value
+
+%Mutual difference mask analyses:
+
+fslmaths cardiac_cv_randomise -thr 0.95 -bin cardiac_cv_randomise_095_bin_c1 %%the significant cardiac CV maps in all comparisons were binarized, this was done to all three significant randomise comparison so three in total (c1-c3)
+
+fslmaths cardiac_cv_randomise_095_bin_c1 -add cardiac_cv_randomise_095_bin_c2 -add cardiac_cv_randomise_095_bin_c3 -thr 3 -bin cardiac_cv_common %c1-3 are the different comparisons
+
+fslstats MREG_cv_mni -k cardiac_cv_common -M %extraction of the mean cardiac CV values from the mutual mask
+
+%R was used to ROC analyses:
+
+par(pty=”s”)
+plot(x, y, xlim = c(0, 0.01), ylim = c(0, 1)) %x is the data and y is the identity i.e. group 1 or 2
+glm_fit = glm(y ~ x)
+lines(x, glm_fit$fitted.values)
+roc(y, glm_fit$fitted.values, plot = TRUE,
+	legacy.axes = True, print.auc = TRUE,
+	identity = FALSE, percent = TRUE, lwd = 2,
+	col = “#RBGCODE”, print.auc.y = 40, print.auc.x = 40) %RGBCODE is the desired color
+
+%For phantom analyses, the same procedure described above for periodograms and calculation of CV/SP/SE maps were used but without brain extraction, bandpass filtering and despiking, and within the flow mask (with fslmaths as described above: fslmaths MREG_phantom_data -mul flow_mask MREG_phantom_flowmask_data) in different flow rates always including 462 samples. So for baseline data points 0 to 462 were used, for 7 cm/s 462 data points forward from 1096, for 14 cm/s 462 data points forward from 1592, and for 21 cm/s 462 data points forward from 2193. The proper amount and timing of data points is extracted with fslroi as described above but using the values described here.
+
+%Extracting background SP from phantom:
+
+fslroi MREG_phantom_flow_1_pg 0 762 MREG_phantom_flow_1_pg_begining %the data from just before the peak to lower frequencies is isolated, these boundaries are estimated from the flow periodogram
+
+fslroi MREG_phantom_flow_1_pg 800 -1 MREG_phantom_flow_1_pg_begining %the data from just after the peak to upper frequencies is isolated, these boundaries are estimated from the flow periodogram
+
+fslmerge -t  MREG_phantom_flow_1_pg_begining  MREG_phantom_flow_1_pg_end MREG_phantom_flow_1_pg_background %this results in a periodogram without the principal frequency for flow rate 1. This is then repeated for other flow rates. From here the SP is calculated as described above and this denotes the background SP. The baseline SP is calculated without fslroi as there are no principal peaks due to flow.
+
+%R was used to calculate the spectrogram:
+
+specto = specgram(signal_voxel$amplitude, n = 4096, Fs = 10, window = 256, overlap = 128) %the amplitude values for the MREG time signal is in the signal_voxel$amplitude
+P = abs(specto$S)
+P = log10(P)
+t = specto$t
+imagep(x = t, y = specto$f, z = t(P), col = oce.colorsViridis, drawPalette = T, decimate = F)
+
+%R was used to examine data normality and in calculating descriptive statistics in the cases described in the statistical analysis of the article and supporting information:
+
+shapiro.test(data) %normality
+mean(data) %average
+sd(data) %standard deviation
+quantile(data) %median and Q1/Q3
+
+%R was used to infer statistical significance in the cases described in the statistical analysis of the article and supporting information:
+
+t.test(data = data_frame, x ~ y) %for normally distributed data with two groups, data_frame contains data, x denotes values and y denotes group
+
+wilcox.test(data = data_frame, x ~ y) %for nonnormal data with two groups, data_frame contains data, x denotes values and y denotes group
+
+aov(data = data_frame, x ~ y) %for normally distributed data (in data_frame) with three groups, x = values, y = group
+
+tukey_hsd(aov(data = data_frame, x, y)) %for post hocs after anova, data_frame contains data, x denotes values and y groups
+
+kruskal.test(data = data_frame, x ~ y) %for nonnormal data with three groups, data_frame contains data and groups, x = data, y = group
+
+dunn_test(data_frame, x ~ y, p.adjust.method = “holm”) %for post hocs after kruskal wallis, data_frame contains data, x denotes values and y groups
+
+%Extracting mean pulsation biometrics from significant brain maps of CV/SP/SE and masking the MREG data as per significant brain area for randomise sensitivity analyses:
+
+fslmaths sig_brain_map -thr 0.95 -bin sig_brain_map_mask %a mask for significant brain area is created, this is repeated for each significant brain map
+
+fslstats MREG_cv_mni -k sig_brain_map_mask -M %CV is used as an example, this is repeated with every NT1 subject and every significant CV/SP/SE map
+
+fslmaths MREG_cv_mni -mul sig_brain_map_mask MREG_cv_mni_sig %CV is used as an example, this is done for all individuals in NT1 group and with all significant brain maps (CV/SP/SE) that are then merged and compared with randomise as described above.
+
+%R was used for general linear modelling:
+
+glm(hrv_rmssd ~ med + sex + age,
+	data = data_frame,
+	family = gaussian()) %in data_frame there are HRV RMSSD, medication status, sex and age)
+
+%for EEG sensitivity analyses to calculate spectrograms, alpha and beta band powers, MATLAB was used:
+
+datai = load(['~' fnames{i}]); % Load preprocessed EEG.
+load('~/egi_10_10.mat') % Load 10-10 electrode information.
+
+raw = datai.data.trial{1};
+% 10-10 electrodes. 5min 
+raw=raw(egi10_10,1:75000);
+frex = linspace(0.01,40,300); % Define frequencies
+conv_res = wavelet_convolution(raw,250,frex,[6 200]); % Calculate Morlet wavelet convolution
+pow_res = mean(abs(conv_res).^2,3); % Calculate power, average over electrodes
+savename = strsplit(fnames{i},'.')
+save(['~' savename{1} '_pow.mat'],'pow_res',"-v7.3");
+
+%% Plot example TF and signals.
+
+figure;
+subplot(221)
+imagesc([1:75000]./250,frex,squeeze(pow_contr(1,:,1:75000)));axis xy
+caxis([0 50]);colorbar;title('example awake HC spectrogram');xlabel('Time/s');ylabel('Frequency / Hz')
+subplot(222)
+data=load('~') % Load corresponding time-series
+rawi=data.data.trial{1};
+hold on;plot([40000:47500]./250,detrend(rawi(egi10_10(1:3:end),40000:47500)',0)+[200:200:24*200],'Color','k')
+yticks([200:200:24*200])
+yticklabels(strcat('E',string(egi10_10(1:3:end))))
+title('HC time series 10-10')
+xlabel('Time / s')
+
+subplot(223)
+imagesc([1:75000]./250,frex,squeeze(pow_narc(7,:,1:75000)));axis xy%,200,'LineColor','none')
+caxis([0 50]);colorbar;title('example NT1 spectrogram');xlabel('Time/s');ylabel('Frequency / Hz')
+data=load('~')
+rawi=data.data.trial{1};
+subplot(224)
+hold on;plot([40000:47500]./250,detrend(rawi(egi10_10(1:3:end),40000:47500)',0)+[200:200:24*200],'Color','k')
+yticks([200:200:24*200])
+yticklabels(strcat('E',string(egi10_10(1:3:end))))
+title('NT1 time series 10-10')
+xlabel('Time / s')
+
+%% Calculate bandpowers
+raw=raw(egi10_10,1:75000);
+alpha=bandpower(raw',250,[8 12]); % In Hz
+beta=bandpower(raw',250,[12.5 30]);

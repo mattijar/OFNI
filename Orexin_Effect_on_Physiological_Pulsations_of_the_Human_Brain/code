@@ -10,19 +10,16 @@ fslroi MREG_input MREG_fslroid 100 2861
 
 %Transforming T1 brain mask to MREG space to only count for data in the brain (so to only preprocess the data in the actual brain to lessen the computational burden):
 
-%betting the T1 data to extract brain for masking, the f and g values, X and Y below, are chosen individually so optimal brain extraction is achieved
-bet T1_input T1_brain -B -f X -g Y
+bet T1_input T1_brain -B -f X -g Y %betting the T1 data to extract brain for masking, the f and g values, X and Y below, are chosen individually so optimal brain extraction is achieved
 
-%transform the T1 to MREG space for a nonbinarized mask
-flirt -in T1_brain -ref MREG_data -out T1_flirtmask -omat flirtmask.mat -bins 256 -cost corratio -searchrx -180 180 -searchry -180 180 -searchrz -180 180 -dof 12 -interp trilinear
+flirt -in T1_brain -ref MREG_data -out T1_flirtmask -omat flirtmask.mat -bins 256 -cost corratio -searchrx -180 180 -searchry -180 180 -searchrz -180 180 -dof 12 -interp trilinear %transform the T1 to MREG space for a nonbinarized mask
 
-%binarize the created mask
-fslmaths T1_flirtmask -bin T1_flirtmask_bin
+fslmaths T1_flirtmask -bin T1_flirtmask_bin %binarize the created mask
 
-%multiplty the original MREG data with the created binarized mask
-fslmaths MREG_despiked -mul T1_flirtmask_bin MREG_despiked_masked
+fslmaths MREG_despiked -mul T1_flirtmask_bin MREG_despiked_masked %multiplty the original MREG data with the created binarized mask
 
 %Spectral Entropy (SE) is calculated in MATLAB:
+
 f = 'inputniftifile.nii.gz'; %read this nifti file (MREG time signal data)
 v = niftiread(f); info = niftiinfo(f); %read given nifti file and its header info
 v = permute(v,[4 1 2 3]); %put time as first dimension
@@ -52,31 +49,21 @@ niftiwrite(vd,fn,info,'Compressed',1); %create the SE result file (compresses to
 
 %For cardiorespiratory range estimation and SP calculations:
 
-%create a voxel-wise periodogram from time-wise MREG data
-3dPeriodogram -prefix MREG_pg -nfft 4096 MREG_data %nfft depends on the data length
+3dPeriodogram -prefix MREG_pg -nfft 4096 MREG_data %create a voxel-wise periodogram from time-wise MREG data, nfft depends on the data length
 
-%for SP calculation, exclude frequencies outside the VLF and cardiorespiratory ranges, use appropriate ranges for each pulsation separately (x and y)
-fslroi MREG_pg MREG_pg_pulsation_range x y
+fslroi MREG_pg MREG_pg_pulsation_range x y %for SP calculation, exclude frequencies outside the VLF and cardiorespiratory ranges, use appropriate ranges for each pulsation separately (x and y)
 
-%calculate spectral power
-3dTstat -prefix MREG_pg_pulsation_sp -sum MREG_pg_pulsation_range
+3dTstat -prefix MREG_pg_pulsation_sp -sum MREG_pg_pulsation_range %calculate spectral power sum
 
 %For filtering of time signal to vlf and cardiorespiratory frequencies after preprocessing:
 
-%after -bandpass use 0.008 0.1 for VLF and cardiorespiratory minimum and maximum for filtering to those ranges (x and y below)
-3dTproject -prefix MREG_data_filtered -dt 0.1 -bandpass x y -input MREG_data
+3dTproject -prefix MREG_data_filtered -dt 0.1 -bandpass x y -input MREG_data %after -bandpass use 0.008 0.1 for VLF and cardiorespiratory minimum and maximum for filtering to those ranges (x and y below)
 
-%For CV, the voxel-wise mean of fullband signal is calculated:
+fslmaths MREG_data -Tmean MREG_tmean %For CV, the voxel-wise mean of fullband signal is calculated:
 
-fslmaths MREG_data -Tmean MREG_tmean
+fslmaths MREG_data_filtered -add MREG_tmean MREG_filtered_addmean %adding mean back to the filtered data to enable CV calculation
 
-%Adding mean to filtered data to enable CV calculation by avoiding dividing by zero:
-
-fslmaths MREG_data_filtered -add MREG_tmean MREG_filtered_addmean
-
-%Voxel-wise CV calculation:
-
-3dTstat -prefix MREG_cv -cvar MREG_filtered_addmean
+3dTstat -prefix MREG_cv -cvar MREG_filtered_addmean %voxel-wise CV calculation
 
 %Registering the subject space SP/CV/SE maps to MNI152 3mm standard space (INPUT is the subject-wise SP/CV/SE map to transform into 3mm MIN152 space and OUTPUT is the transformed SP/CV/SE map):
 
@@ -92,7 +79,7 @@ fslmaths MNI152_T1_3mm_brain_bin.nii.gz -fillh MNI152_T1_3mm_brain_bin_fillh
 
 fslmaths MREG_cv_mni -mul MNI152_T1_3mm_brain_bin_fillh MREG_cv_mni_masked
 
-%Create a merge-file for statistical randomise analysis, example with CV but use the same for SP and SE maps. The three dots (...) denote that all subjects are included in the list:
+%Create a merge-file for statistical randomise analysis, example with CV but use the same for SP and SE maps. The three dots (...) denote that all subjects (1 to n) are included in the list:
 
 fslmerge -t MREG_cv_maps_merged MREG_cv_mni_masked_1 MREG_cv_mni_masked_2 MREG_cv_mni_masked_3 …
 
@@ -100,19 +87,15 @@ fslmerge -t MREG_cv_maps_merged MREG_cv_mni_masked_1 MREG_cv_mni_masked_2 MREG_c
 
 randomise -i MREG_cv_maps_merged -o MREG_cv_randomise -d design_file.mat -t design_file.con -n 10000 -T
 
-%fiducial point detection for HRV RMSSD calculations:
+%using MATLAB, the fiducial point detection and HRV RMSSD calculations:
 
 a = signal; %physiological photoplethysmogram data
 ad = diff(a); %difference of the signal (detect maximal slope)
 thr = 240; %peak distance threshold value that can be changed manually if needed
 minpeakh = -inf; %min peak height value, can be changed manually if needed
 [pks,locs] = findpeaks(ad,'minpeakdistance',thr, 'MinPeakHeight', minpeakh); %search slope locations
-
-%HRV
 locsx = locs/300; %locations to time
 xls = 0; %initialize
-
-%RMSSD
 for z=1:length(locsx)-1
     xl0 = locsx(z);
     xl1 = locsx(z+1);
@@ -120,19 +103,16 @@ for z=1:length(locsx)-1
     xls = xls+xl;
 end
 xlsm = xls/(length(locsx)-1);
-xlsm = xlsm*1000; %milliseconds
+xlsm = xlsm*1000; %ms
 hrv = sqrt(xlsm); %hrv rmssd value
 
 %Mutual difference mask analyses:
 
-%The significant cardiac CV maps in all comparisons were binarized
-fslmaths cardiac_cv_randomise -thr 0.95 -bin cardiac_cv_randomise_095_bin_c1 %this was done to all three significant randomise comparison so three in total (c1-c3)
+fslmaths cardiac_cv_randomise -thr 0.95 -bin cardiac_cv_randomise_095_bin_c1 %%the significant cardiac CV maps in all comparisons were binarized, this was done to all three significant randomise comparison so three in total (c1-c3)
 
-%These maps were added and all voxels with a value 3 are now common in all comparisons so thresholding for 3 results in a brain map where all comparisons have common significant voxels
 fslmaths cardiac_cv_randomise_095_bin_c1 -add cardiac_cv_randomise_095_bin_c2 -add cardiac_cv_randomise_095_bin_c3 -thr 3 -bin cardiac_cv_common %c1-3 are the different comparisons
 
-%Extraction of the mean cardiac CV values from the mutual mask:
-fslstats MREG_cv_mni -k cardiac_cv_common -M
+fslstats MREG_cv_mni -k cardiac_cv_common -M %extraction of the mean cardiac CV values from the mutual mask
 
 %R was used to ROC analyses:
 
@@ -176,7 +156,7 @@ t.test(data = data_frame, x ~ y) %for normally distributed data with two groups,
 
 wilcox.test(data = data_frame, x ~ y) %for nonnormal data with two groups, data_frame contains data, x denotes values and y denotes group
 
-anova(data) %for normally distributed data with three groups
+aov(data = data_frame, x ~ y) %for normally distributed data (in data_frame) with three groups, x = values, y = group
 
 tukey_hsd(aov(data = data_frame, x, y)) %for post hocs after anova, data_frame contains data, x denotes values and y groups
 
@@ -192,10 +172,10 @@ fslstats MREG_cv_mni -k sig_brain_map_mask -M %CV is used as an example, this is
 
 fslmaths MREG_cv_mni -mul sig_brain_map_mask MREG_cv_mni_sig %CV is used as an example, this is done for all individuals in NT1 group and with all significant brain maps (CV/SP/SE) that are then merged and compared with randomise as described above.
 
-%R was used to estimate whether medication status affects arousal state:
+%R was used for general linear modelling:
 
 glm(hrv_rmssd ~ med + sex + age,
-	data =data_frame,
+	data = data_frame,
 	family = gaussian()) %in data_frame there are HRV RMSSD, medication status, sex and age)
 
 %for EEG sensitivity analyses to calculate spectrograms, alpha and beta band powers, MATLAB was used:
